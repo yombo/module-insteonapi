@@ -37,18 +37,16 @@ Implements
 - class InsteonAPI - the command module 
 
 .. moduleauthor:: Mitch Schwenk <mitch-gw@yombo.net>
-:copyright: Copyright 2012-2013 by Yombo.
+:copyright: Copyright 2012-2016 by Yombo.
 :license: GPL(v3)
 """
 import time
 #import re
 
 from yombo.core.module import YomboModule
-from yombo.core.sqldict import SQLDict
-from yombo.core.helpers import getComponent, getInterfaceModule
-from yombo.core.log import getLogger
+from yombo.core.log import get_logger
 
-logger = getLogger("modules.insteonapi")
+logger = get_logger("modules.insteonapi")
 
 class InsteonCmd:
     """
@@ -73,7 +71,7 @@ class InsteonCmd:
         self.cmdobj = message.payload['cmdobj']
         """@ivar: The command itself
            @type: C{YomboDevice}"""
-        self.deviceClass = "insteon"
+        self.device_class = "insteon"
 
         self.address = self.deviceobj.deviceVariables['insteonaddress']['value'][0].upper()
         """@ivar: Insteon unit address.
@@ -121,7 +119,7 @@ class InsteonCmd:
                 'commandResult': self.commandResult,
                 'deviceobj': self.deviceobj,
                 'cmdobj': self.cmdobj,
-                'deviceClass': self.deviceClass,
+                'device_class': self.device_class,
                 'created': self.created,
                 }
                 
@@ -180,46 +178,51 @@ class InsteonAPI(YomboModule):
         self._ModAuthor = "Mitch Schwenk @ Yombo"
         self._ModUrl = "http://www.yombo.net"
 
-#        self._RegisterDistributions = ['cmd']
         self.insteoncmds = {}         #store a copy of active x10cmds
         self.originalMessage = None
         self.interfaceSupport = False
 
-        self.deviceLinks = SQLDict(self,"deviceLinks")  # used to store what devices
+        self.deviceLinks = {}
+#        self.deviceLinks = SQLDict(self,"deviceLinks")  # used to store what devices
                                           # listen to group broadcasts.
                                           # data saved in this dict is saved
                                           # in SQL and recreated on startup.
-
-        self.insteonDeviceTypes = {
-          'Insteon Appliance' : "Ps4joEmGM129qUo7Ra2YigmT",
-          'Insteon Lamp' : "DTlJJrGOBp8SxBCQYSepfcA4",
-          }
 
         self.insteonDevices = {} # used to lookup insteon address to a device
 #        for devkey, device in self._LocalDevicesByUUID.iteritems():
 #            self.insteonDevices[device.deviceVariables['address'][0].upper()] = device
 
+#        logger.warn("Device types: {dt}", dt=self._DeviceTypes)
+
     def _load_(self):
-        try:
-            interfaceModule = self._DeviceTypes.itervalues().next()  # Just get any deviceType as they all are routed to the same interface module
-            self.interfaceModule = self._ModulesLibrary.getDeviceRouting(interfaceModule[0]['devicetypeuuid'], 'Interface', 'module')
-            self.interfaceSupport = True
-            self._reload_()
-        except:
-            # no X10API module!
-            logger.warn("Insteon API - No Insteon interface module found, disabling Insteon support.")
-            self.interfaceSupport = False
+        self._reload_()
 
     def _reload_(self):
+        try:
+            interface_device_type = self._DeviceTypes[0]  # We only handle x10. Only x10 device types come here. Just pick the first one.
+            self.interfaceModule = self._Libraries['devices'].get_device_routing(interface_device_type, 'Interface', 'module')
+            self.interfaceSupport = True
+            print "interfaceModule: %s" % self.interfaceModule
+            logger.error("Insteon API - Interface Module: {mmm}", mmm=self.interfaceModule)
+        except:
+            # no X10API module!
+            logger.error("Insteon API - No Insteon interface module found, disabling Insteon support.")
+            self.interfaceSupport = False
+
         if self.interfaceSupport:
             self.insteonDevices.clear()
-            for devkey, device in self._Devices.iteritems():
+            logger.info("devicesByType--: {out}", out=self._DevicesByType('insteon_appliance'))
+            for devkey, device in self._DevicesByType('insteon_appliance').iteritems():
                 logger.info("devicevariables: {vars}", vars=device.deviceVariables)
                 iaddress = device.deviceVariables['insteonaddress']['value'][0].upper()
-                self.x10devices[address] = device
+                self.insteonDevices[iaddress] = device
+            for devkey, device in self._DevicesByType('insteon_lamp').iteritems():
+                logger.info("devicevariables: {vars}", vars=device.deviceVariables)
+                iaddress = device.deviceVariables['insteonaddress']['value'][0].upper()
+                self.insteonDevices[iaddress] = device
 
     def _start_(self):
-        logger.debug("Insteon API command module started") 
+        logger.debug("Insteon API command module started")
         
     def _stop_(self):
         pass
@@ -229,8 +232,10 @@ class InsteonAPI(YomboModule):
 
     def message(self, message):
         logger.debug("InsteonAPI got message: {message}", message=message.dump())
+        logger.debug("InsteonAPI device: {message}", message=message['payload']['deviceobj'].device_route)
         if message.msgType == 'cmd' and message.msgStatus == 'new':
-            if message.payload['deviceobj'].deviceUUID in self._Devices:
+#            print self._Devices
+            if message.payload['deviceobj'].device_id in self._Devices:
 #              try:
                 self.processNewCmdMsg(message)
 #              except:
@@ -241,13 +246,12 @@ class InsteonAPI(YomboModule):
 
         insteonCmd = InsteonCmd(self, message)
 
-
         self.insteoncmds[message.msgUUID] = insteonCmd
-        logger.info("NEW: insteonCmd: {insteonCmd}", insteonCmd=insteonCmd.dump())
+        logger.debug("NEW: insteonCmd: {insteonCmd}", insteonCmd=insteonCmd.dump())
 
 #        x10cmd.deviceobj.getRouting('interface')
-#        self._ModulesLibrary.getDeviceRouting(x10cmd.deviceobj.deviceTypeUUID, 'Interface')
-        self.interfaceModule.sendInsteonCmd(insteonCmd)
+#        self._ModulesLibrary.getDeviceRouting(x10cmd.deviceobj.device_type_id, 'Interface')
+        self.interfaceModule.insteonapi_send_command(insteonCmd)
 
     def statusUpdate(self, address, command, status=None):
         """
@@ -258,12 +262,12 @@ class InsteonAPI(YomboModule):
           newstatus = None
           tempcmd = command.upper()
 
-          if device.deviceTypeUUID == self.insteonDeviceTypes["Insteon Lamp"]:
+          if device.device_type_id == self._DeviceTypes["Insteon Lamp"]:
             if tempcmd == 'ON':
               newstatus = 'ON'
             elif tempcmd == 'OFF':
               newstatus = 'OFF'
-          elif device.deviceTypeUUID == self.insteonDeviceTypes["Insteon Appliance"]:
+          elif device.device_type_id == self._DeviceTypes["Insteon Appliance"]:
             if tempcmd == 'ON':
               newstatus = 100
             elif tempcmd == 'OFF':
@@ -288,7 +292,7 @@ class InsteonAPI(YomboModule):
                 newstatus = 0
 
           logger.debug("status update... {newstatus}", newstatus=newstatus)
-          device.setStatus(status=newstatus, source="x10api")
+          device.set_status(status=newstatus, source="x10api")
 
     def cmdDone(self, insteonCmd):
         """
