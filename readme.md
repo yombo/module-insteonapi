@@ -1,11 +1,16 @@
+Summary
+=======
+
+A Yombo command module module that adds support for Insteon products. This
+module is required if Insteon products are used.
+
+Additional details about this module at: https://docs.yombo.net/Modules/insteonapi
+
+Learn about [Yombo Gateway](https://yombo.net/) or
+[Get started today](https://docs.yombo.net/Gateway/Quick_start)
+
 Usage
 =====
-
-This module extends the capabilities of the `Yombo Gateway <https://yombo.net/>`_
-by adding support for Insteon products.
-
-Insteon Support
-================
 
 This module adds basic support for accepting commands for Insteon devices. However,
 and Insteon PLM or Insteon Network type module is also required to deliver the
@@ -30,9 +35,9 @@ it under the terms of the GNU General Public License as published by
 the Free Software Foundation, either version 3 of the License, or
 (at your option) any later version.
 
-The GNU General Public License can be found here: `GNU.Org <http://www.gnu.org/licenses>`_
+The GNU General Public License can be found here: [GNU.Org](http://www.gnu.org/licenses)
 
-The `Yombo <https://yombo.net/>`_ team and other contributors
+The [Yombo](https://yombo.net/) team and other contributors
 hopes that it will be useful, but WITHOUT ANY WARRANTY; without even the
 implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 

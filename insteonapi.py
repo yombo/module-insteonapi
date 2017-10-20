@@ -40,127 +40,25 @@ Implements
 :copyright: Copyright 2012-2016 by Yombo.
 :license: GPL(v3)
 """
-import time
-#import re
+try:  # Prefer simplejson if installed, otherwise json will work swell.
+    import simplejson as json
+except ImportError:
+    import json
+from time import time
 
+from collections import OrderedDict
+
+from twisted.internet.defer import inlineCallbacks
+
+from yombo.lib.webinterface.auth import require_auth
+from yombo.utils import global_invoke_all
 from yombo.core.module import YomboModule
 from yombo.core.log import get_logger
+from yombo.utils.decorators import memoize_ttl
+from yombo.utils import translate_int_value
 
 logger = get_logger("modules.insteonapi")
 
-class InsteonCmd:
-    """
-    An Insteon command instance that is passed between this module
-    and any interface modules to send insteon commands to the power line.
-    
-    :ivar insteonaddress: Insteon unit address.
-    :type insteonaddress: string
-    """
-    def __init__(self, apimodule, message = {'msgID':None}):
-        """
-        Setup the class to communicate between insteon API module and any interface modules.
-        
-        :param insteonapi: A pointer to the insteonapi class.
-        :type insteonapi: instance
-        :param message: ???
-        :type message: ??
-        """
-        self.deviceobj = message.payload['deviceobj']
-        """@ivar: The device itself
-           @type: C{YomboDevice}"""
-        self.cmdobj = message.payload['cmdobj']
-        """@ivar: The command itself
-           @type: C{YomboDevice}"""
-        self.device_class = "insteon"
-
-        self.address = self.deviceobj.deviceVariables['insteonaddress']['value'][0].upper()
-        """@ivar: Insteon unit address.
-           @type: C{string}"""
-        self.command = message['payload']['cmdobj'].cmd.upper()
-        """@ivar: Text representing the command - on, off, dim, etc.
-           @type: C{string}"""
-
-        self.msguuid = message.msgUUID
-        """@ivar: The msgID that was generated to create this command. Is None if comming from interface module.
-           @type: C{str}"""
-        self.extended = None
-        """@ivar: Extended data to send with the insteon command.
-           @type: C{hex}"""
-        self.deviceState = None
-        """@ivar: The updated state of the device. This is set by the interface module.
-           @type: C{str} or C{int}"""
-        self.interfaceResult = None
-        """@ivar: Interface Result. This is set by the interface module.
-           @type: C{str} or C{int}"""
-        self.commandResult = None
-        """@ivar: The result from the command. Will be set by the interface module.
-           @type: C{str} or C{int}"""
-
-        self.created = int(time.time())
-        self.interfaceResult = None
-        self.commandResult = None
-        self.status1 = None
-        self.status2 = None
-        self.originalMessage = message
-        self.apimodule = apimodule
-
-    def dump(self):
-        """
-        Convert key class contents to a dictionary.
-
-        @return: A dictionary of the key class contents.
-        @rtype: C{dict}
-        """
-        return {'address': self.address,
-                'command': self.command,
-                'extended': self.extended,
-                'deviceState': self.deviceState,
-                'interfaceResult': self.interfaceResult,
-                'commandResult': self.commandResult,
-                'deviceobj': self.deviceobj,
-                'cmdobj': self.cmdobj,
-                'device_class': self.device_class,
-                'created': self.created,
-                }
-                
-    def sendCmdToInterface(self):
-        """
-        Send to the insteon command module
-        """
-        self.apimodule.interfaceModule.sendInsteonCmd(self)
-        
-    def statusReceived(self, status, statusExtended={}):
-        """
-        Contains updated status of a device received from the interface.
-        """
-        pass
-        
-    def done(self):
-        """
-        Called by the interface module once the command has been completed.
-        
-        Note: the interface module will call the insteonapi module when a device
-        has a status change.  This is a different process then a command.
-        """
-        self.apimodule.cmdDone(self)
-        self.apimodule.removeInsteonCmd(self)
-
-    def cmdPending(self):
-        """
-        Used to tell the sending module that the command is pending (processing)
-        """
-        reply = self.originalMessage.getReply(msgStatus='processing', msgStatusExtra="interface module processing request")
-        reply.send()
-    
-    def cmdFailed(self, statusmsg):
-        """
-        Used to tell the sending module that the command failed.
-        
-        statussg should hold the failure reason.  Displayed to user.
-        """
-        reply = self.originalMessage.getReply(msgStatus='failed', msgStatusExtra="interface module failed to process request")
-        self.apimodule.removeInsteonCmd(self)
-        reply.send()
         
 class InsteonAPI(YomboModule):
     """
@@ -170,162 +68,250 @@ class InsteonAPI(YomboModule):
     and prepares it for an interface module.  Also receives data from
     interface modules for delivery to other gateway modules.
     """
+    @inlineCallbacks
+    def _init_(self, **kwargs):
+        self.interface_module = None
+        self.devices = yield self._SQLDict.get(self, "devices")
 
-    def _init_(self):
-#        logger.info("&&&&: Insteon Module Devices: {devices}", devices=self._Devices)
-#        logger.info("&&&&: Insteon Module DeviceTypes: {devicesTypes}", deviceTypes=self._DeviceTypes)
-        self._ModDescription = "Insteon API command interface"
-        self._ModAuthor = "Mitch Schwenk @ Yombo"
-        self._ModUrl = "http://www.yombo.net"
+    @inlineCallbacks
+    def _load_(self, **kwargs):
+        results = yield global_invoke_all('insteonapi_interfaces', called_by=self)
+        temp = {}
+        for component_name, data in results.items():
+            temp[data['priority']] = {'name': component_name, 'module': data['module']}
 
-        self.insteoncmds = {}         #store a copy of active x10cmds
-        self.originalMessage = None
-        self.interfaceSupport = False
-
-        self.deviceLinks = {}
-#        self.deviceLinks = SQLDict(self,"deviceLinks")  # used to store what devices
-                                          # listen to group broadcasts.
-                                          # data saved in this dict is saved
-                                          # in SQL and recreated on startup.
-
-        self.insteonDevices = {} # used to lookup insteon address to a device
-#        for devkey, device in self._LocalDevicesByUUID.iteritems():
-#            self.insteonDevices[device.deviceVariables['address'][0].upper()] = device
-
-#        logger.warn("Device types: {dt}", dt=self._DeviceTypes)
-
-    def _load_(self):
-        self._reload_()
-
-    def _reload_(self):
-        try:
-            interface_device_type = self._DeviceTypes[0]  # We only handle x10. Only x10 device types come here. Just pick the first one.
-            self.interfaceModule = self._Libraries['devices'].get_device_routing(interface_device_type, 'Interface', 'module')
-            self.interfaceSupport = True
-            print "interfaceModule: %s" % self.interfaceModule
-            logger.error("Insteon API - Interface Module: {mmm}", mmm=self.interfaceModule)
-        except:
-            # no X10API module!
+        interfaces = OrderedDict(sorted(temp.items()))
+        self.interface_module = None
+        if len(interfaces) == 0:
             logger.error("Insteon API - No Insteon interface module found, disabling Insteon support.")
-            self.interfaceSupport = False
+        else:
+            key = list(interfaces.keys())[-1]
+            self.interface_module = temp[key]['module']  # we can only have one interface, highest priority wins!!
+            self.interface_module.insteonapi_init(self)  # tell the interface module about us.
 
-        if self.interfaceSupport:
-            self.insteonDevices.clear()
-            logger.info("devicesByType--: {out}", out=self._DevicesByType('insteon_appliance'))
-            for devkey, device in self._DevicesByType('insteon_appliance').iteritems():
-                logger.info("devicevariables: {vars}", vars=device.deviceVariables)
-                iaddress = device.deviceVariables['insteonaddress']['value'][0].upper()
-                self.insteonDevices[iaddress] = device
-            for devkey, device in self._DevicesByType('insteon_lamp').iteritems():
-                logger.info("devicevariables: {vars}", vars=device.deviceVariables)
-                iaddress = device.deviceVariables['insteonaddress']['value'][0].upper()
-                self.insteonDevices[iaddress] = device
-
-    def _start_(self):
+    def _start_(self, **kwargs):
         logger.debug("Insteon API command module started")
         
-    def _stop_(self):
+    def _stop_(self, **kwargs):
         pass
 
-    def _unload_(self):
+    def _unload_(self, **kwargs):
         pass
+    #
+    # def _device_type_loaded_(self, **kwargs):
+    #     print("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1")
+    #     return "aaaaaaaaaa"
 
-    def message(self, message):
-        logger.debug("InsteonAPI got message: {message}", message=message.dump())
-        logger.debug("InsteonAPI device: {message}", message=message['payload']['deviceobj'].device_route)
-        if message.msgType == 'cmd' and message.msgStatus == 'new':
-#            print self._Devices
-            if message.payload['deviceobj'].device_id in self._Devices:
-#              try:
-                self.processNewCmdMsg(message)
-#              except:
-#                logger.info("")
+    def _webinterface_add_routes_(self, **kwargs):
+        """
+        Adds a configuration block to the web interface. This allows users to view their nest account for
+        thermostat ID's which they can copy to the device setup page.
+        :param kwargs:
+        :return:
+        """
+        return {
+            'nav_side': [
+                {
+                    'label1': 'Device Tools',
+                    'label2': 'Insteon',
+                    'priority1': None,  # Even with a value, 'Tools' is already defined and will be ignored.
+                    'priority2': 15001,
+                    'icon': 'fa fa-info fa-fw',
+                    'url': '/tools/module_insteonapi',
+                    'tooltip': '',
+                    'opmode': 'run',
+                },
+            ],
+            'routes': [
+                self.web_interface_routes,
+            ],
+        }
 
-    def processNewCmdMsg(self, message):
-        logger.debug("in insteponapi::processNewCmdMsg")
+    def web_interface_routes(self, webapp):
+        """
+        Adds routes to the webinterface module.
 
-        insteonCmd = InsteonCmd(self, message)
+        :param webapp: A pointer to the webapp, it's used to setup routes.
+        :return:
+        """
+        with webapp.subroute("/") as webapp:
+            @webapp.route("/tools/module_insteonapi", methods=['GET'])
+            @require_auth()
+            def page_tools_module_insteonap_get(webinterface, request, session):
+                interface_devices = self.interface_module.get_found_devices()
+                insteon_addresses = self.insteon_addresses
+                appliance_dt = self._DeviceTypes['insteon_appliance']
+                light_dt = self._DeviceTypes['insteon_lamp']
+                for address, device in interface_devices.items():
+                    if address in insteon_addresses:
+                        device['device_id'] = self.get_insteon_device(address)
+                    else:
+                        device['device_id'] = None
+                        if 'light' in device['capabilities']:
+                            device['device_type'] = light_dt
+                        elif 'switch' in device['capabilities']:
+                            device['device_type'] = appliance_dt
+                        else:
+                            device['device_type'] = None
 
-        self.insteoncmds[message.msgUUID] = insteonCmd
-        logger.debug("NEW: insteonCmd: {insteonCmd}", insteonCmd=insteonCmd.dump())
+                        variables = {
+                            'address': {
+                                'new_99': address
+                            },
+                        }
+                        device['json_output'] = json.dumps({
+                        # 'device_id': '',
+                        'label': '',
+                        'machine_label': '',
+                        'description': device['description'] + " - " + device['model'],
+                        # 'statistic_label': "myhouse." +
+                        # 'statistic_lifetime': 0,
+                        'device_type_id': device['device_type'].device_type_id,
+                        'vars': variables,
+                        # 'variable_data': json_output['vars'],
+                        })
 
-#        x10cmd.deviceobj.getRouting('interface')
-#        self._ModulesLibrary.getDeviceRouting(x10cmd.deviceobj.device_type_id, 'Interface')
-        self.interfaceModule.insteonapi_send_command(insteonCmd)
 
-    def statusUpdate(self, address, command, status=None):
+                page = webinterface.webapp.templates.get_template('modules/insteonapi/web/home.html')
+                return page.render(alerts=webinterface.get_alerts(),
+                                   devices=interface_devices
+                                   )
+
+
+    def _device_command_(self, **kwargs):
+        """
+        Implements the system hook to process commands.
+
+        This will only process commands for insteon devices. X10 commands must come from an API based module.
+        """
+        if self.interface_module is None:
+            logger.info("InstonAPI module cannot process device commands: no insteon interface module found.")
+            return False
+
+        device = kwargs['device']
+        request_id = kwargs['request_id']
+
+        if self._is_my_device(device) is False:
+            logger.warn("InsteonAPI module cannot handle device_type_id: {device_type_id}", device_type_id=device.device_type_id)
+            return False
+
+        if self.interface_module.status is not True:
+            device.device_command_failed(
+                request_id,
+                message="Problem with Homevision connection, requested command could not be completed"
+            )
+            logger.debug("InstonAPI interface module ({interface_module}) reports an invalid status: {status}",
+                         interface_module=self.interface_module._Name, status = self.interface_module.status)
+            return False
+
+        module_device_types = self._ModuleDeviceTypes()
+
+        kwargs['device_type'] = module_device_types[device.device_type_id]
+        device.device_command_processing(request_id)
+        results = self.interface_module.device_command(**kwargs)
+        if results[0] == 'failed':
+            device.device_command_failed(request_id, message=results[1])
+        elif results[0] == 'done':
+            device.device_command_done(request_id, message=results[1])
+        else:
+            device.device_command_done(request_id)
+
+    @property
+    def insteon_addresses(self):
+        devices = self._ModuleDevices()
+        addresses = []
+        for device_id, device in devices.items():
+            addresses.append(device.device_variables['address']['values'][0].upper())
+        return addresses
+
+    @memoize_ttl(60)
+    def insteon_devices(self):
+        my_devices = self._ModuleDevices()
+        devices = {}
+        for device_id, device in my_devices.items():
+            devices[device.device_variables['address']['values'][0].upper()] = device
+        return devices
+
+    @memoize_ttl(60)
+    def get_insteon_device(self, address):
+        """
+        Looks for an insteon device given the provided address. 
+        :param address: 
+        :return: the device pointer
+        """
+        address = address.upper()
+        devices = self._ModuleDevices()
+        for device_id, device in devices.items():
+            temp_address = device.device_variables['address']['values'][0].upper()
+            if address == temp_address:
+                return device
+        return None
+
+    def insteon_device_update(self, device, command_label):
         """
         Called by interface modules when a device has a change of status.
         """
-        if address in self.insteonDevices:
-          device =  self.insteonDevices[address]
-          newstatus = None
-          tempcmd = command.upper()
+        # print("insteon got update...")
+        try:
+            yombo_device = self.get_insteon_device(device['address'])
+        except Exception as e:
+            yombo_device = None
 
-          if device.device_type_id == self._DeviceTypes["Insteon Lamp"]:
-            if tempcmd == 'ON':
-              newstatus = 'ON'
-            elif tempcmd == 'OFF':
-              newstatus = 'OFF'
-          elif device.device_type_id == self._DeviceTypes["Insteon Appliance"]:
-            if tempcmd == 'ON':
-              newstatus = 100
-            elif tempcmd == 'OFF':
-              newstatus = 0
-            elif tempcmd == 'DIM':
-              if type(device.status[0]['status']) is int:
-                  newstatus = device.status[0]['status'] - 12
-              else:
-                  newstatus = 88
-            elif tempcmd == 'BRIGHT':
-              if type(device.status[0]['status']) is int:
-                  newstatus = device.status[0]['status'] + 12
-              else:
-                  newstatus = 100
+        if device['address'] not in self.devices:
+            self.devices[device['address']] = {
+                'onlevel': 0,
+            }
+            if yombo_device is None:
+                self._Notifications.add({
+                    'title': 'New Insteon device found',
+                    'message': 'The insteon PLM module found a new insteon device. <p>Address: %s <br>Type: %s <br>Description: %s <br>Capabilities: %s' %
+                               (device['address'], device['model'], device['description'], str.join(", ", device['capabilities'])),
+                    'source': 'Insteon PLM Module',
+                    'persist': True,
+                    'priority': 'high',
+                    'always_show': True,
+                    'always_show_allow_clear': True,
+                    'id': 'insteonplm_%s' % device['address_hex'],
+                })
 
-            if type(newstatus) is int:
-              if newstatus > 100:
-                  newstatus = 100
-              elif newstatus < 0:
-                  newstatus = 0
-            else:
-                newstatus = 0
+        if self.devices[device['address']]['onlevel'] != device['onlevel']:
+            self.devices[device['address']]['onlevel'] = device['onlevel']
+            if yombo_device != None:
+                human_status = str(round(translate_int_value(device['onlevel'], 0, 255, 0, 100),1)) + "%"
 
-          logger.debug("status update... {newstatus}", newstatus=newstatus)
-          device.set_status(status=newstatus, source="x10api")
+                # now try to associate device status change with any recently sent commands.
+                commands_pending = yombo_device.commands_pending(
+                    criteria =
+                        {
+                            'status': ['sent', 'received', 'pending', 'done'],
+                        },
+                    limit = 1)
+                # print("insteon found commands pending")
+                # import json
+                # print(json.dumps(commands_pending))
+                # print(type(commands_pending))
+                # for k, vals in commands_pending.items():
+                #     print("* k = %s" % k)
 
-    def cmdDone(self, insteonCmd):
-        """
-        Called after interface module reports the command was sent out.
-        
-        First update the device status value, then sent a cmdreply msg.
-        Finally, send a status message.
-        """
-        replmsg = insteonCmd.originalMessage.getReply(status='done', statusExtra="Command completed.")
-        logger.debug("msgreply: {msgreply}", msgreply=replmsg.dump())
-        replmsg.send()
+                last_request_id = None
+                cur_time = time()
+                for request_id, device_command in commands_pending.items():
+                    if cur_time - device_command.created_at < 1:
+                        last_command = device_command.command.machine_label
+                        if command_label is 'on' and last_command in ('on', 'on_fast', 'dim', 'brighten', 'dim_stop', 'brighten_stop'):
+                            last_request_id = request_id
+                            break
+                        if command_label is 'off' and last_command in ('off', 'off_fast'):
+                            last_request_id = request_id
+                            break
 
-    def cmdFailed(self, x10cmd, statusmsg="Unknown reason."):
-        """
-        Used to tell the sending module that the command has failed.
-        
-        statusmsg should contain the status messsage to display to user
-        or enter on a log file.
-        """
-        pass
-    
-    def removeX10Cmd(self, x10cmd):
-        """
-        Delete an old x10cmd object
-        """
-        logger.debug("Purging x10cmd object: {x10cmd}", x10cmd=x10cmd.x10uuid)
-        del self.x10cmds[x10cmd.x10uuid]
-        logger.debug("pending x10cmds: {x10cmds}", x10cmds=self.x10cmds)
-    
-    def removeInsteonCmd(self, insteonCmd):
-        """
-        Delete an old x10cmd object
-        """
-        logger.debug("Purging insteon command instance: {msguuid}", msguuid=insteonCmd.msguuid)
-        del self.insteoncmds[insteonCmd.msguuid]
-        logger.debug("pending insteonCmds: {insteoncmds}", insteoncmds=self.insteoncmds)
+                if last_request_id is not None:
+                    yombo_device.device_command_done(last_request_id)
+
+                yombo_device.set_status(
+                    human_status=human_status,
+                    human_message="%s is now %s" % (yombo_device.label, human_status),
+                    machine_status=device['onlevel'],
+                    command=command_label,
+                    request_id=last_request_id,
+                    reported_by=self.interface_module._FullName)

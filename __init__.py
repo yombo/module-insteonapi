@@ -1,1 +1,1 @@
-from insteonapi import InsteonAPI
+from .insteonapi import InsteonAPI
