@@ -1,5 +1,5 @@
 #This file was created by Yombo for use with Yombo Gateway automation
-#software.  Details can be found at http://yombo.net
+#software.  Details can be found at https://yombo.net
 """
 Insteon API
 ===========

@@ -4,10 +4,10 @@ Summary
 A Yombo command module module that adds support for Insteon products. This
 module is required if Insteon products are used.
 
-Additional details about this module at: https://docs.yombo.net/Modules/insteonapi
+Additional details about this module at: https://yombo.net/Modules/insteonapi
 
 Learn about [Yombo Gateway](https://yombo.net/) or
-[Get started today](https://docs.yombo.net/Gateway/Quick_start)
+[Get started today](https://yombo.net/Docs/Gateway/Quick_start)
 
 Usage
 =====
